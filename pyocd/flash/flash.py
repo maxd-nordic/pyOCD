@@ -622,9 +622,14 @@ class Flash:
         state = Target.State.RUNNING # lgtm[py/multiple-definition]
         with Timeout(timeout) as time_out:
             while time_out.check():
-                state = self.target.get_state()
-                if state != Target.State.RUNNING:
-                    break
+                try:
+                    state = self.target.get_state()
+                    if state != Target.State.RUNNING:
+                        break
+                except exceptions.TransferTimeoutError:
+                    LOG.debug("target.get_state probe timeout")
+                except exceptions.TransferFaultError:
+                    LOG.debug("target.get_state probe fault")
             else:
                 # Operation timed out.
                 self.target.halt()
