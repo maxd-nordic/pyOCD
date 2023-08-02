@@ -401,8 +401,10 @@ class NRF53(CoreSightTarget):
 
     def __init__(self, session, memory_map=None):
         super(NRF53, self).__init__(session, memory_map)
-        self.ctrl_ap = None
-        self.was_locked = False
+        self.ctrl_ap_app = None
+        self.ctrl_ap_net = None
+        self.was_locked_app = False
+        self.was_locked_net = False
 
     def create_init_sequence(self):
         seq = super(NRF53, self).create_init_sequence()
@@ -418,21 +420,28 @@ class NRF53(CoreSightTarget):
         seq.wrap_task('discovery',
             lambda seq: seq.insert_after('create_cores',
                               ('persist_unlock', self.persist_unlock),
+                              ('check_flash_security_net', self.check_flash_security_net),
                           )
             )
         seq.insert_before('post_connect_hook',
                           ('check_part_info', self.check_part_info))
 
         return seq
+
     def check_ctrl_ap_idr(self):
-        self.ctrl_ap = self.dp.aps[CTRL_AP_APP_NUM]
+        self.ctrl_ap_app = self.dp.aps[CTRL_AP_APP_NUM]
+        self.ctrl_ap_net = self.dp.aps[CTRL_AP_NET_NUM]
+        self.was_locked_app = not self.ap_is_enabled(AHB_AP_APP_NUM)
+        self.was_locked_net = not self.ap_is_enabled(AHB_AP_NET_NUM)
 
-        # Check CTRL-AP ID.
-        if self.ctrl_ap.idr != CTRL_IDR_EXPECTED:
-            LOG.error("%s: bad CTRL-AP IDR (is 0x%08x)", self.part_number, self.ctrl_ap.idr)
+        # Check CTRL-AP IDs.
+        if self.ctrl_ap_app.idr != CTRL_IDR_EXPECTED:
+            LOG.error("%s: bad CTRL-AP IDR (is 0x%08x)", self.part_number, self.ctrl_ap_app.idr)
+        if self.ctrl_ap_net.idr != CTRL_IDR_EXPECTED:
+            LOG.error("%s: bad CTRL-AP IDR (is 0x%08x)", self.part_number, self.ctrl_ap_net.idr)
 
-    def ap_is_enabled(self):
-        csw = self.dp.read_ap(AHB_AP_APP_NUM << 24)
+    def ap_is_enabled(self, ap_num):
+        csw = self.dp.aps[ap_num].read_reg(0)
         return csw & CSW_DEVICEEN
 
     def check_flash_security(self):
@@ -450,43 +459,44 @@ class NRF53(CoreSightTarget):
         if target_id & 0xF0000 != 0x70000:
             LOG.error(f"This doesn't look like an nRF53 devcice!")
 
-        if self.is_locked():
-            self.was_locked = True
+        if self.was_locked_app:
             if self.session.options.get('auto_unlock'):
-                LOG.warning("%s APPROTECT enabled: will try to unlock via mass erase", self.part_number)
+                LOG.warning("%s APP CORE APPROTECT enabled: will try to unlock via mass erase", self.part_number)
 
-                unlock_successful = False
-                for _ in range(3):
-                    # Do the mass erase.
-                    if not self.mass_erase():
-                        continue
+                self.mass_erase_app()
 
-                    # Check if AP was enabled
-                    if self.ap_is_enabled():
-                        unlock_successful = True
-                        break
-                    else:
-                        LOG.debug("unlock was not successful, retrying")
-
-                if not unlock_successful:
+                # Check if AP was enabled
+                if not self.ap_is_enabled(AHB_AP_APP_NUM):
                     raise exceptions.TargetError("unable to unlock device")
+
                 self._discoverer._create_1_ap(AHB_AP_APP_NUM)
             else:
-                LOG.warning("%s APPROTECT enabled: not automatically unlocking", self.part_number)
+                LOG.warning("%s APP CORE APPROTECT enabled: not automatically unlocking", self.part_number)
         else:
             LOG.info("%s not in secure state", self.part_number)
 
-    def is_locked(self):
-        return not self.ap_is_enabled()
-    
-    def is_eraseprotected(self):
-        status = self.ctrl_ap.read_reg(CTRL_AP_ERASEPROTECTSTATUS)
-        return status & CTRL_AP_ERASEPROTECTSTATUS_MSK == 0
+    def check_flash_security_net(self):
+        # Release NETWORK.FORCEOFF
+        self.write32(0x50005614, 0)
 
+        if not self.ap_is_enabled(AHB_AP_NET_NUM):
+            if self.session.options.get('auto_unlock'):
+                LOG.warning("%s NET CORE APPROTECT enabled: will try to unlock via mass erase", self.part_number)
+                self.mass_erase_net()
+                self._discoverer._create_1_ap(AHB_AP_NET_NUM)
+    
+    def is_eraseprotected(self, ctrl_ap):
+        status = ctrl_ap.read_reg(CTRL_AP_ERASEPROTECTSTATUS)
+        return status & CTRL_AP_ERASEPROTECTSTATUS_MSK == 0
+    
     def mass_erase(self):
-        if self.is_eraseprotected():
+        self.mass_erase_app()
+        self.mass_erase_net()
+    
+    def mass_erase_app(self):
+        if self.is_eraseprotected(self.ctrl_ap_app):
             LOG.warning("ERASEPROTECT is enabled.")
-            if self.is_locked():
+            if self.was_locked_app:
                 LOG.error("If the firmware supports unlocking with a known 32-bit key,")
                 LOG.error("then this is the only way to recover the device.")
                 return False
@@ -496,12 +506,18 @@ class NRF53(CoreSightTarget):
                 eraser._log_chip_erase = False
                 eraser.erase()
                 return True
-
+        self.mass_erase_ctrl_ap(self.ctrl_ap_app)
+        
+            
+    def mass_erase_net(self):
+        self.mass_erase_ctrl_ap(self.ctrl_ap_net)
+            
+    def mass_erase_ctrl_ap(self, ctrl_ap):
         # See Nordic Whitepaper nWP-027 for magic numbers and order of operations from the vendor
-        self.ctrl_ap.write_reg(CTRL_AP_ERASEALL, CTRL_AP_ERASEALL_ERASE)
+        ctrl_ap.write_reg(CTRL_AP_ERASEALL, CTRL_AP_ERASEALL_ERASE)
         with Timeout(MASS_ERASE_TIMEOUT) as to:
             while to.check():
-                status = self.ctrl_ap.read_reg(CTRL_AP_ERASEALLSTATUS)
+                status = ctrl_ap.read_reg(CTRL_AP_ERASEALLSTATUS)
                 if status == CTRL_AP_ERASEALLSTATUS_READY:
                     break
                 sleep(0.5)
@@ -510,8 +526,8 @@ class NRF53(CoreSightTarget):
                 LOG.error("Mass erase timeout waiting for ERASEALLSTATUS")
                 return False
         sleep(0.01)
-        self.ctrl_ap.write_reg(CTRL_AP_RESET, CTRL_AP_RESET_RESET)
-        self.ctrl_ap.write_reg(CTRL_AP_RESET, CTRL_AP_RESET_NORESET)
+        ctrl_ap.write_reg(CTRL_AP_RESET, CTRL_AP_RESET_RESET)
+        ctrl_ap.write_reg(CTRL_AP_RESET, CTRL_AP_RESET_NORESET)
         sleep(0.2)
         return True
 
@@ -530,7 +546,7 @@ class NRF53(CoreSightTarget):
             # Write Unprotected to UICR.SECUREAPPROTECT
             self.write_uicr(0x00FF801C, 0x50FA50FA)
 
-        if self.session.options.get('auto_unlock') and self.was_locked:
+        if self.session.options.get('auto_unlock') and self.was_locked_app:
             # write unlock image
             self.write_flash(0, nrf53_app_empty_image)
 
