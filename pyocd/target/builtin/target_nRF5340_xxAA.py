@@ -396,6 +396,7 @@ class NRF53XX(NRF53):
             blocksize=0x1000,
             is_boot_memory=True,
             algo=FLASH_ALGO_APP,
+            core_index=0,
         ),
         FlashRegion(
             start=0x01000000,
@@ -403,6 +404,7 @@ class NRF53XX(NRF53):
             blocksize=0x1000,
             is_boot_memory=True,
             algo=FLASH_ALGO_NET,
+            core_index=1,
         ),
         FlashRegion(
             start=0x00ff8000,
@@ -411,6 +413,7 @@ class NRF53XX(NRF53):
             is_testable=False,
             is_erasable=False,
             algo=FLASH_ALGO_APP_UICR,
+            core_index=0,
         ),
         FlashRegion(
             start=0x01ff8000,
@@ -419,6 +422,7 @@ class NRF53XX(NRF53):
             is_testable=False,
             is_erasable=False,
             algo=FLASH_ALGO_NET_UICR,
+            core_index=1,
         ),
         RamRegion(start=0x20000000, length=0x80000),
     )

@@ -22,6 +22,7 @@ from ...core import exceptions
 from ...coresight.coresight_target import CoreSightTarget
 from ...flash.eraser import FlashEraser
 from ...utility.timeout import Timeout
+from ...coresight.cortex_m_v8m import CortexM_v8M
 
 from typing import (Callable, TYPE_CHECKING, Union)
 ProgressCallback = Callable[[Union[int, float]], None]
@@ -473,7 +474,7 @@ class NRF53(CoreSightTarget):
             else:
                 LOG.warning("%s APP CORE APPROTECT enabled: not automatically unlocking", self.part_number)
         else:
-            LOG.info("%s not in secure state", self.part_number)
+            LOG.info("%s APP not in secure state", self.part_number)
 
     def check_flash_security_net(self):
         # Release NETWORK.FORCEOFF
@@ -484,6 +485,15 @@ class NRF53(CoreSightTarget):
                 LOG.warning("%s NET CORE APPROTECT enabled: will try to unlock via mass erase", self.part_number)
                 self.mass_erase_net()
                 self._discoverer._create_1_ap(AHB_AP_NET_NUM)
+        else:
+            LOG.info("%s NET not in secure state", self.part_number)
+
+        # not sure why the core wasn't created in the first place
+        core_net = CortexM_v8M(self.session, self.aps[1], self.memory_map, 1)
+        core_net.default_reset_type = self.ResetType.SW_SYSRESETREQ
+        self.aps[1].core = core_net
+        core_net.init()
+        self.add_core(core_net)
     
     def is_eraseprotected(self, ctrl_ap):
         status = ctrl_ap.read_reg(CTRL_AP_ERASEPROTECTSTATUS)
